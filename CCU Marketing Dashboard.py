@@ -21,7 +21,7 @@ Command line:  python "CCU Marketing Dashboard.py" --pull [--config <config.yaml
                python "CCU Marketing Dashboard.py" --folder <a saved export folder>   (rebuild, no API calls)
 No extra packages needed (standard library only). Runs on Windows and macOS.
 """
-import argparse, base64, csv, json, os, queue, re, statistics, subprocess, sys, threading, time, webbrowser, zlib
+import argparse, base64, csv, json, os, queue, re, ssl, statistics, subprocess, sys, threading, time, webbrowser, zlib
 import urllib.error, urllib.parse, urllib.request
 from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone, tzinfo
@@ -30,34 +30,36 @@ from pathlib import Path
 MAC = sys.platform == "darwin"
 
 
+APP_VERSION = "2026-11-03c"
+
+
 def mac_certificates():
     """python.org Python on macOS has no certificate store of its own, so HTTPS fails with
-    CERTIFICATE_VERIFY_FAILED. Use certifi's when it is installed, else export the Mac's own trusted roots."""
-    if os.environ.get("SSL_CERT_FILE"):
-        return
+    CERTIFICATE_VERIFY_FAILED. Returns (SSL context, where its certificates came from): certifi's when it is
+    installed, else the Mac's own trusted roots exported from the keychains. Every HTTPS call uses it."""
     try:
         import certifi
-        os.environ["SSL_CERT_FILE"] = certifi.where()
-        return
-    except ImportError:
+        return ssl.create_default_context(cafile=certifi.where()), "certifi"
+    except (ImportError, OSError, ssl.SSLError):
         pass
     pem = Path.home() / "Library" / "Caches" / "ccu_marketing_roots.pem"
     try:
         if not pem.exists() or time.time() - pem.stat().st_mtime > 7 * 86400:
-            out = b"".join(subprocess.run(["/usr/bin/security", "find-certificate", "-a", "-p", k],
+            out = b"".join(subprocess.run(["/usr/bin/security", "find-certificate", "-a", "-p", str(k)],
                                           capture_output=True, timeout=60).stdout
-                           for k in ["/System/Library/Keychains/SystemRootCertificates.keychain",
-                                     "/Library/Keychains/System.keychain"])
+                           for k in [Path("/System/Library/Keychains/SystemRootCertificates.keychain"),
+                                     Path("/Library/Keychains/System.keychain"),
+                                     Path.home() / "Library/Keychains/login.keychain-db"] if k.exists())
             if b"BEGIN CERTIFICATE" in out:
                 pem.parent.mkdir(parents=True, exist_ok=True); pem.write_bytes(out)
         if pem.exists():
-            os.environ["SSL_CERT_FILE"] = str(pem)
-    except (OSError, subprocess.SubprocessError):
+            return ssl.create_default_context(cafile=str(pem)), "the Mac keychain"
+    except (OSError, subprocess.SubprocessError, ssl.SSLError):
         pass
+    return None, "Python's own (none found on this Mac)"
 
 
-if MAC:
-    mac_certificates()
+SSL_CTX, SSL_SOURCE = mac_certificates() if MAC else (None, "Windows")
 
 
 def app_folder():
@@ -111,6 +113,7 @@ CAVEATS = [
     "Email clicks are visits tagged utm_source=klaviyo or medium email. Klaviyo's own attributed orders (any order within its attribution window after an open or click) are shown separately as Klaviyo reports them; they overlap with other channels and are not incremental lift.",
     "Order value is the order total including tax and shipping, before refunds. Net revenue counts standing orders only (not cancelled, fully refunded or voided) and is the subtotal after discounts and refunds, without tax and shipping. ROAS = click-attributed net revenue / ad spend.",
     "Marketplace orders (TikTok Shop, Walmart, eBay) arrive through Shopify, so their clicks happen on the marketplace and cannot be attributed here. In-store (POS) orders have no clicks.",
+    "TikTok Shop promotions that TikTok pays for (the order note \"Platform Discount on Items\") count as sales at the full price, not as discounts, because TikTok pays that money to the shop. Only discounts the shop pays for show up under promo codes and discounts. Marketplace commissions and fees are not taken off.",
     "Sessions, add-to-cart, checkout and conversion come from Shopify's own analytics (ShopifyQL) and use Shopify's traffic-source grouping, which differs slightly from the click classification above. Shopify counts bot visits as 'direct' sessions.",
     "Windows use complete days in the store's time zone. 7/28/90 days end yesterday and compare with the same number of days just before; a calendar month compares with the month before (a month still running compares with the same days of last month); a custom range compares with the same number of days just before it. Comparisons show only when that earlier period is inside the loaded days. Klaviyo flow results are grouped by day in UTC, so a flow email sent late in the evening can land on the next day; campaigns count by send date with all their results to date. New customers are first-ever orders by Shopify's lifetime order count.",
     "Channel names for sales apps come from Shopify (for example the Shop app and the Facebook & Instagram shop).",
@@ -176,7 +179,7 @@ def http_json(url, data=None, headers=None, retries=4, secret=None):
     for attempt in range(retries + 1):
         req = urllib.request.Request(url, data=data, headers=headers or {}, method="POST" if data is not None else "GET")
         try:
-            with urllib.request.urlopen(req, timeout=180) as r:
+            with urllib.request.urlopen(req, timeout=180, context=SSL_CTX) as r:
                 return json.loads(r.read() or b"{}")
         except urllib.error.HTTPError as e:
             if e.code in (429, 500, 502, 503, 504) and attempt < retries:
@@ -198,15 +201,47 @@ def http_json(url, data=None, headers=None, retries=4, secret=None):
             raise AppError(f"Can't reach {host}: {e.reason}") from None
 
 
+def platform_paid(o):
+    """TikTok Shop orders arrive with TikTok's own promotions recorded as a Shopify discount ("TikTok Shop Discount"),
+    but the note "Platform Discount on Items: USD 100.00" says TikTok paid that part and pays it to the shop.
+    Count it as sales, not as money given away: add it back to the order, its subtotal and its item prices,
+    and take it out of the discounts. Only that one number is kept from the order notes."""
+    paid = 0.0
+    for a in o.pop("customAttributes", None) or []:
+        if (a.get("key") or "").strip().lower() == "platform discount on items":
+            try:
+                paid += float((a.get("value") or "").split()[-1].replace(",", ""))
+            except (ValueError, IndexError):
+                pass
+    if paid <= 0:
+        return
+    o["platformDiscount"] = round(paid, 2)
+    for k in ("totalPriceSet", "currentSubtotalPriceSet"):
+        m = (o.get(k) or {}).get("shopMoney")
+        if m is not None and (k == "totalPriceSet" or float(m.get("amount") or 0) > 0):   # a fully refunded order stays at 0
+            m["amount"] = str(round(float(m.get("amount") or 0) + paid, 2))
+    d = (o.get("totalDiscountsSet") or {}).get("shopMoney")
+    if d is not None:
+        left = max(0.0, float(d.get("amount") or 0) - paid)
+        d["amount"] = str(round(left, 2))
+        if left < 0.01:   # nothing the shop paid for: not a promo code use either
+            o["discountCodes"] = [c for c in o.get("discountCodes") or [] if c != "TikTok Shop Discount"]
+    lines = [l for l in o.get("lines") or [] if l[0] > 0]
+    base = sum(l[0] * l[3] for l in lines)
+    for l in lines:   # spread it over the items by what they sold for (evenly when they all sold for 0)
+        share = l[0] * l[3] / base if base > 0 else l[0] / sum(x[0] for x in lines)
+        l[3] = round(l[3] + paid * share / l[0], 4)
+
+
 class Shopify:
     BULK_RUN = "mutation($q:String!){ bulkOperationRunQuery(query:$q){ bulkOperation{ id } userErrors{ message } } }"
     BULK_STATUS = "query($id:ID!){ node(id:$id){ ... on BulkOperation { status errorCode objectCount url } } }"
     ORDERS = ('{ orders(query:"created_at:>=%s") { edges { node { id createdAt sourceName test cancelledAt displayFinancialStatus '
               'totalPriceSet { shopMoney { amount } } currentSubtotalPriceSet { shopMoney { amount } } '
               'app { name } customer { id numberOfOrders } refunds { id createdAt totalRefundedSet { shopMoney { amount } } } '
-              'discountCodes totalDiscountsSet { shopMoney { amount } } shippingAddress { provinceCode countryCodeV2 } '
+              'discountCodes totalDiscountsSet { shopMoney { amount } } shippingAddress { provinceCode countryCodeV2 } customAttributes { key value } '
               'lineItems { edges { node { title currentQuantity discountedUnitPriceAfterAllDiscountsSet { shopMoney { amount } } '
-              'product { id handle productType } variant { inventoryItem { unitCost { amount } } } } } } } } } }')
+              'product { id handle productType title } variant { inventoryItem { unitCost { amount } } } } } } } } } }')
     REFUND_ITEMS = ("query($ids:[ID!]!){ nodes(ids:$ids){ ... on Order { refunds { id "
                     "refundLineItems(first:250){ nodes{ quantity } } } } } }")
     VISIT = "source referrerUrl landingPage occurredAt utmParameters { source medium campaign content term }"
@@ -284,7 +319,7 @@ class Shopify:
             raise AppError(f"Shopify bulk export ended {s['status']} ({s['errorCode']})")
         if not s["url"]:
             return []
-        with urllib.request.urlopen(s["url"], timeout=600) as f:
+        with urllib.request.urlopen(s["url"], timeout=600, context=SSL_CTX) as f:
             rows = [json.loads(line) for line in f.read().decode("utf-8").splitlines() if line.strip()]
         # bulk exports list line items as their own rows pointing at the order (__parentId); put them back on it
         orders = {r["id"]: dict(r, lines=[]) for r in rows if "__parentId" not in r}
@@ -293,10 +328,13 @@ class Shopify:
                 cost = (((r.get("variant") or {}).get("inventoryItem") or {}).get("unitCost") or {}).get("amount")
                 price = ((r.get("discountedUnitPriceAfterAllDiscountsSet") or {}).get("shopMoney") or {}).get("amount")
                 p = r.get("product") or {}
-                # [items still on the order, cost per item, title, price per item after discounts, product type, handle, product id]
+                # [items still on the order, cost per item, title, price per item after discounts, product type, handle, product id,
+                #  the product's name in Shopify (the title is the listing name the sales channel used)]
                 orders[r["__parentId"]]["lines"].append([int(r.get("currentQuantity") or 0), float(cost) if cost not in (None, "") else None,
                                                          r.get("title") or "", float(price or 0), p.get("productType") or "",
-                                                         p.get("handle") or "", p.get("id") or ""])
+                                                         p.get("handle") or "", p.get("id") or "", p.get("title") or ""])
+        for o in orders.values():
+            platform_paid(o)
         return list(orders.values())
 
     def refund_items(self, order_ids):
@@ -793,12 +831,12 @@ def compute_marketing(orders, journeys, gads_rows, gclid_map, meta_rows, kl, tra
             if ci == len(chs):
                 chs.append(ch)
             seen = set()
-            for l in lines:   # [items, cost, title, price after discounts, type, handle, product id]
+            for l in lines:   # [items, cost, title, price after discounts, type, handle, product id, Shopify product name]
                 if len(l) < 4:
                     continue
                 key = l[6] or "t:" + l[2]
-                if key not in pidx:
-                    pidx[key] = len(pmeta); pmeta.append([l[2], l[4], l[5]])
+                if key not in pidx:   # one row per Shopify product, named as in Shopify (channels list it under their own names)
+                    pidx[key] = len(pmeta); pmeta.append([(l[7] if len(l) > 7 else "") or l[2], l[4], l[5]])
                 pr = prod[(d, pidx[key], ci)]
                 pr[0] += l[0]; pr[1] += l[0] * l[3]; pr[2] += l[0] * (l[1] or 0); pr[3] += key not in seen; seen.add(key)
             for code in [c.upper() for c in (o.get("discountCodes") or [])] or ([""] if "discountCodes" in o else []):
@@ -913,7 +951,9 @@ def pull(cfg_path, log=print, raw_dir=None):
     if not cfg_path:
         raise AppError("No config.yaml found. Put it next to this program (or in Downloads / Documents).")
     cfg = read_config(cfg_path)
-    log(f"Config: {cfg_path}")
+    log(f"Version {APP_VERSION}. Config: {cfg_path}")
+    if MAC:
+        log(f"Web certificates: {SSL_SOURCE}")
     sh = Shopify(cfg, log)
     shop = sh.shop()
     tz = shop_tz(shop)
@@ -1115,7 +1155,7 @@ def run_gui():
     from tkinter import ttk, messagebox, filedialog, scrolledtext
 
     root = tk.Tk()
-    root.title(APP_NAME)
+    root.title(f"{APP_NAME}  (version {APP_VERSION})")
     root.geometry("720x460")
     root.minsize(560, 360)
     q = queue.Queue()
