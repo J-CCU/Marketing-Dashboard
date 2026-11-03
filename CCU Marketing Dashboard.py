@@ -19,16 +19,68 @@ Press Start:  1) pulls, read only (nothing in any account is changed):
 No key or token from config.yaml is ever written into the exports or the dashboard.
 Command line:  python "CCU Marketing Dashboard.py" --pull [--config <config.yaml>] [--no-open]
                python "CCU Marketing Dashboard.py" --folder <a saved export folder>   (rebuild, no API calls)
-No extra packages needed (standard library only).
+No extra packages needed (standard library only). Runs on Windows and macOS.
 """
-import argparse, base64, csv, json, queue, re, statistics, sys, threading, time, webbrowser, zlib
+import argparse, base64, csv, json, os, queue, re, statistics, subprocess, sys, threading, time, webbrowser, zlib
 import urllib.error, urllib.parse, urllib.request
 from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone, tzinfo
 from pathlib import Path
 
+MAC = sys.platform == "darwin"
+
+
+def mac_certificates():
+    """python.org Python on macOS has no certificate store of its own, so HTTPS fails with
+    CERTIFICATE_VERIFY_FAILED. Use certifi's when it is installed, else export the Mac's own trusted roots."""
+    if os.environ.get("SSL_CERT_FILE"):
+        return
+    try:
+        import certifi
+        os.environ["SSL_CERT_FILE"] = certifi.where()
+        return
+    except ImportError:
+        pass
+    pem = Path.home() / "Library" / "Caches" / "ccu_marketing_roots.pem"
+    try:
+        if not pem.exists() or time.time() - pem.stat().st_mtime > 7 * 86400:
+            out = b"".join(subprocess.run(["/usr/bin/security", "find-certificate", "-a", "-p", k],
+                                          capture_output=True, timeout=60).stdout
+                           for k in ["/System/Library/Keychains/SystemRootCertificates.keychain",
+                                     "/Library/Keychains/System.keychain"])
+            if b"BEGIN CERTIFICATE" in out:
+                pem.parent.mkdir(parents=True, exist_ok=True); pem.write_bytes(out)
+        if pem.exists():
+            os.environ["SSL_CERT_FILE"] = str(pem)
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
+if MAC:
+    mac_certificates()
+
+
+def app_folder():
+    """Where config.yaml, exports and dashboards live: next to the .py, the .exe, or the Mac .app."""
+    if not getattr(sys, "frozen", False):
+        return Path(__file__).resolve().parent
+    here = Path(sys.executable).resolve().parent
+    for p in here.parents:   # .../X.app/Contents/MacOS/X -> the folder holding X.app
+        if p.suffix == ".app":
+            here = p.parent
+            break
+    return here if os.access(here, os.W_OK) else Path.home() / "Downloads"   # a read-only (quarantined) app copy
+
+
+def open_folder(p):
+    if MAC:
+        subprocess.run(["open", str(p)], check=False)
+    else:
+        webbrowser.open(Path(p).as_uri())
+
+
 APP_NAME = "CashCards Marketing Dashboard"
-HERE = Path(sys.argv[0] if getattr(sys, "frozen", False) else __file__).resolve().parent
+HERE = app_folder()
 EXPORTS = HERE / "exports"
 DASHBOARDS = HERE / "dashboards"
 CONFIG_NAMES = ["config.yaml", "config.yml"]
@@ -138,6 +190,9 @@ def http_json(url, data=None, headers=None, retries=4, secret=None):
                 else " (the app or token is missing a permission for this data)" if e.code == 403 else ""
             raise AppError(f"{host} answered HTTP {e.code}{hint}: {detail}") from None
         except urllib.error.URLError as e:
+            if "CERTIFICATE_VERIFY_FAILED" in str(e.reason):   # retrying won't help
+                raise AppError(f"Can't reach {host}: {e.reason}. This Python has no web certificates; on a Mac run "
+                               "'Install Certificates.command' in the Applications > Python 3.x folder, then try again") from None
             if attempt < retries:
                 time.sleep(2 ** attempt); continue
             raise AppError(f"Can't reach {host}: {e.reason}") from None
@@ -1067,13 +1122,13 @@ def run_gui():
     state = {"cfg": find_config()}
 
     frm = ttk.Frame(root, padding=16); frm.pack(fill="both", expand=True)
-    ttk.Label(frm, text=APP_NAME, font=("Segoe UI", 16, "bold")).pack(anchor="w")
+    ttk.Label(frm, text=APP_NAME, font=("Helvetica Neue" if MAC else "Segoe UI", 16, "bold")).pack(anchor="w")
     ttk.Label(frm, text="Pull Shopify, Google Ads, Meta and Klaviyo (read only) and build the marketing dashboard.",
               foreground="#555").pack(anchor="w", pady=(0, 10))
     cfgvar = tk.StringVar()
     ttk.Label(frm, textvariable=cfgvar).pack(anchor="w", pady=(0, 10))
     bar = ttk.Frame(frm); bar.pack(fill="x")
-    logbox = scrolledtext.ScrolledText(frm, height=12, font=("Consolas", 9), state="disabled")
+    logbox = scrolledtext.ScrolledText(frm, height=12, font=("Menlo", 11) if MAC else ("Consolas", 9), state="disabled")
     logbox.pack(fill="both", expand=True, pady=(10, 0))
 
     def log(msg):   # safe from the worker thread
@@ -1128,7 +1183,7 @@ def run_gui():
     buttons = [ttk.Button(bar, text="▶  Start", command=start),
                ttk.Button(bar, text="Choose config...", command=pick_cfg),
                ttk.Button(bar, text="Rebuild from saved export...", command=rebuild),
-               ttk.Button(bar, text="Open folder", command=lambda: webbrowser.open(HERE.as_uri()))]
+               ttk.Button(bar, text="Open folder", command=lambda: open_folder(HERE))]
     for i, b in enumerate(buttons):
         b.pack(side="left", padx=(0 if i == 0 else 8, 0))
     refresh()
