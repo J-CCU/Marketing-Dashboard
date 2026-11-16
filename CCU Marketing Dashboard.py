@@ -1354,14 +1354,42 @@ ol.actions .tag{margin-left:6px} ol.actions a{color:var(--accent);font-size:12px
 .heat th{position:static;font-weight:500;padding:0 4px;cursor:default;background:none}
 .movers{display:grid;grid-template-columns:1fr 1fr;gap:12px} @media (max-width:600px){.movers{grid-template-columns:1fr}}
 .movers ol{margin:4px 0;padding-left:20px;font-size:13px} .movers li{margin:3px 0}
+#printMenu{margin:0;position:relative}
+#printMenu>summary{list-style:none;color:var(--text);font-size:14px;cursor:pointer;font:inherit;background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:6px 12px}
+#printMenu>summary::-webkit-details-marker{display:none}
+#printMenu .pm{position:absolute;right:0;top:calc(100% + 4px);min-width:170px;background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:6px;display:flex;flex-direction:column;gap:2px;z-index:20;box-shadow:0 6px 20px rgba(0,0,0,.14)}
+#printMenu .pm button{border:0;background:none;text-align:left;padding:7px 10px;border-radius:6px}
+#printMenu .pm button:hover{background:var(--grid)}
+#printMenu .pm .note{padding:2px 10px 4px}
+#printInfo{display:none}
+@media print{
+  :root{color-scheme:light}
+  body{background:#fff;font-size:12px}
+  main{max-width:none;padding:0}
+  #themeBtn,#printMenu,nav.tabs,.sticky,.seg,input,select,button{display:none!important}
+  #printInfo{display:block;font-size:12px;color:var(--text2);margin:0 0 12px}
+  .card,.kpi{break-inside:avoid}
+  .scroll{max-height:none;overflow:visible}
+  th{position:static}
+  #flow,.heat{overflow:visible}
+  body.print-all main>section{display:block!important;break-before:page}
+  body.print-all main>section:first-of-type{break-before:auto}
+  section[data-print-title]::before{content:attr(data-print-title);display:block;font-size:18px;font-weight:600;margin:0 0 10px}
+}
 </style>
 </head>
 <body>
 <main>
   <div class="row" style="justify-content:space-between;align-items:flex-start;flex-wrap:nowrap">
     <div><h1 id="title">Marketing Dashboard</h1><p class="sub" id="sub"></p></div>
-    <button id="themeBtn" title="Toggle light/dark" style="flex:none">◐ Theme</button>
+    <div class="row" style="flex:none;gap:6px">
+      <button id="themeBtn" title="Toggle light/dark">◐ Theme</button>
+      <details id="printMenu"><summary title="Print or save as PDF">Print ▾</summary>
+        <div class="pm"><button id="printTab">This tab</button><button id="printAll">All tabs</button>
+          <span class="note">Each tab on its own page</span></div></details>
+    </div>
   </div>
+  <p id="printInfo"></p>
   <div class="sticky">
     <div class="row" style="justify-content:space-between;margin-bottom:6px">
       <div class="row"><span class="note">Window</span><div class="seg" id="winSeg"><button data-w="7">7 days</button><button data-w="28">28 days</button><button data-w="90">90 days</button></div>
@@ -2230,6 +2258,37 @@ $('cApply').onclick=()=>{ let f=$('cFrom').value, t=$('cTo').value; if(!f||!t) r
 $('modelSeg').onclick=e=>{ const b=e.target.closest('button'); if(b){ S.model=b.dataset.m; rerender(); } };
 $('themeBtn').onclick=()=>{ const r=document.documentElement; const dark=r.dataset.theme? r.dataset.theme==='dark' : matchMedia('(prefers-color-scheme: dark)').matches; r.dataset.theme=dark?'light':'dark'; rerender(); };
 matchMedia('(prefers-color-scheme: dark)').addEventListener('change',rerender);
+// ---------- print ----------
+// Printing always uses the light look (dark-mode text is pale grey and unreadable on paper) and leaves the controls
+// out; a line at the top says what is shown. "All tabs" draws every tab and puts each on its own page.
+const PR={on:false};
+const tabName=t=>(document.querySelector(`#tabs button[data-t="${t}"]`)||{}).textContent||t;
+function printPrep(all){
+  if(PR.on) return; PR.on=true;
+  const r=document.documentElement; PR.theme=r.getAttribute('data-theme'); r.setAttribute('data-theme','light');
+  PR.anim=Chart.defaults.animation; Chart.defaults.animation=false;
+  done.clear();
+  if(all){
+    document.body.classList.add('print-all');
+    document.querySelectorAll('main>section').forEach(s=>{ s.classList.remove('hidden'); s.dataset.printTitle=tabName(s.id); });
+    Object.keys(RENDER).forEach(t=>{ try{ RENDER[t](); }catch(e){ console.error(e); } });
+  } else { RENDER[S.tab](); }
+  const w=win(), model={last:'last click',first:'first click',split:'split credit'}[S.model]||S.model;
+  $('printInfo').textContent=`${$('title').textContent} · ${all?'All tabs':tabName(S.tab)} · ${fmtDay(w.from)} – ${fmtDay(w.to)} · click credit: ${model} · printed ${new Date().toLocaleString()}`;
+  Object.values(Chart.instances||{}).forEach(c=>{ try{ c.resize(); c.update('none'); }catch(e){} });
+}
+function printDone(){
+  if(!PR.on) return; PR.on=false;
+  const r=document.documentElement; if(PR.theme==null) r.removeAttribute('data-theme'); else r.setAttribute('data-theme',PR.theme);
+  Chart.defaults.animation=PR.anim; document.body.classList.remove('print-all');
+  document.querySelectorAll('main>section').forEach(s=>{ delete s.dataset.printTitle; });
+  rerender();
+}
+function doPrint(all){ $('printMenu').open=false; printPrep(all); requestAnimationFrame(()=>requestAnimationFrame(()=>print())); }
+addEventListener('beforeprint',()=>printPrep(false));   // Ctrl+P / Cmd+P prints the tab on screen
+addEventListener('afterprint',printDone);
+$('printTab').onclick=()=>doPrint(false); $('printAll').onclick=()=>doPrint(true);
+document.addEventListener('click',e=>{ if(!e.target.closest('#printMenu')) $('printMenu').open=false; });
 let rt; addEventListener('resize',()=>{ clearTimeout(rt); rt=setTimeout(()=>{ if(S.tab==='overview') renderFlow(totals(win())); },200); });
 if(!RENDER[S.tab]) S.tab='overview'; S.w=String(S.w); { const m=/^m:(\d{4}-\d\d)$/.exec(S.w), c=/^c:(\d{4}-\d\d-\d\d):(\d{4}-\d\d-\d\d)$/.exec(S.w);
   if(!(['7','28','90'].includes(S.w) || (m && monthEnd(m[1])>=M.start && m[1]+'-01'<=END) || (c && c[1]<=c[2] && c[1]>=M.start && c[2]<=END))) S.w='28'; } if(!['last','first','split'].includes(S.model)) S.model='last';
