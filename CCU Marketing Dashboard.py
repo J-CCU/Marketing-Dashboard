@@ -959,6 +959,8 @@ def pull(cfg_path, log=print, raw_dir=None):
     from concurrent.futures import ThreadPoolExecutor
     if not cfg_path:
         raise AppError("No config.yaml found. Put it next to this program (or in Downloads / Documents).")
+    if not Path(cfg_path).is_file():
+        raise AppError(f"config.yaml not found: {cfg_path}. Check the --config path or use Choose config...")
     cfg = read_config(cfg_path)
     log(f"Version {APP_VERSION}. Config: {cfg_path}")
     if MAC:
@@ -1110,7 +1112,8 @@ def save_exports(data, folder, log=print):
     mk, ret = data["marketing"], data["retention"]
     write_rows(folder / "web_order_clicks.csv", ["date", "order value", "net revenue", "standing", "first click channel",
                "first click detail", "last click channel", "last click detail", "days to convert", "visits", "customer", "product cost"], mk["web"])
-    cols = ["channel", "orders", "standing orders", "order value", "net revenue", "new-customer orders", "product cost", "items", "items with a cost"]
+    cols = ["channel", "orders", "standing orders", "order value", "net revenue", "new-customer orders", "product cost", "items", "items with a cost",
+            "discounts", "refunded"]
     write_rows(folder / "sales_by_channel_daily.csv", ["date"] + cols, mk["sales_daily"])
     write_rows(folder / "sales_by_channel_monthly.csv", ["month"] + cols, mk["sales_monthly"])
     write_rows(folder / "online_store_sessions_daily.csv", ["date", "traffic source", "referrer", "sessions", "added to cart",

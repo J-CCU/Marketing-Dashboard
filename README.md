@@ -184,7 +184,7 @@ The export folder is stamped with the store's local time; the dashboard file wit
 
 ## Troubleshooting
 
-- **"No config.yaml found" / "config.yaml not found".** Place it next to the app, or use **Choose config...** / `--config`.
+- **"No config.yaml found" / "config.yaml not found".** Place it next to the app, or use **Choose config...** / `--config`. With `--config`, check that the path points to an existing file.
 - **"config.yaml: ... is missing ..." or "fill in ...".** A required key for that source is empty. Check the indentation (exactly two spaces) and spelling against [Configuration](#configuration).
 - **"login rejected: check the keys in config.yaml" (HTTP 401).** The credentials for that source are wrong or have expired.
 - **"missing a permission for this data" (HTTP 403).** The token or app lacks a read permission (scope) for that data. For Shopify, see the scopes under [Configuration](#configuration).
