@@ -22,7 +22,7 @@ Command line:  python "CCU Marketing Dashboard.py" --pull [--config <config.yaml
 No extra packages needed (standard library only). Runs on Windows and macOS.
 """
 import argparse, base64, csv, json, os, queue, re, ssl, statistics, subprocess, sys, threading, time, webbrowser, zlib
-import urllib.error, urllib.parse, urllib.request
+import http.client, urllib.error, urllib.parse, urllib.request
 from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone, tzinfo
 from pathlib import Path
@@ -187,8 +187,9 @@ def http_json(url, data=None, headers=None, retries=4, secret=None):
             body = e.read()[:4000].decode("utf-8", "replace")
             title = re.search(r"<title>(.*?)</title>", body, re.S)   # Shopify's OAuth errors are HTML pages
             detail = title.group(1).strip() if title else re.sub(r"\s+", " ", body)[:300]
-            if secret:
-                detail = detail.replace(secret, "<token>")
+            for sec in ([secret] if isinstance(secret, str) else secret or []):
+                if sec:
+                    detail = detail.replace(sec, "<token>")
             hint = " (login rejected: check the keys in config.yaml)" if e.code == 401 or (e.code == 400 and "auth" in url + detail.lower()) \
                 else " (the app or token is missing a permission for this data)" if e.code == 403 else ""
             raise AppError(f"{host} answered HTTP {e.code}{hint}: {detail}") from None
@@ -199,6 +200,10 @@ def http_json(url, data=None, headers=None, retries=4, secret=None):
             if attempt < retries:
                 time.sleep(2 ** attempt); continue
             raise AppError(f"Can't reach {host}: {e.reason}") from None
+        except (OSError, http.client.HTTPException) as e:   # timeout / reset / cut-off reply while reading
+            if attempt < retries:
+                time.sleep(2 ** attempt); continue
+            raise AppError(f"Can't reach {host}: {type(e).__name__} {e}".rstrip()) from None
 
 
 def platform_paid(o):
@@ -261,7 +266,8 @@ class Shopify:
                 raise AppError("config.yaml: fill in shopify.client_id and shopify.client_secret")
             body = urllib.parse.urlencode({"grant_type": "client_credentials", "client_id": b["client_id"],
                                            "client_secret": b["client_secret"]}).encode()
-            r = http_json(self.root + "/admin/oauth/access_token", body, {"Content-Type": "application/x-www-form-urlencoded"})
+            r = http_json(self.root + "/admin/oauth/access_token", body, {"Content-Type": "application/x-www-form-urlencoded"},
+                          secret=b["client_secret"])
             self.token = r.get("access_token")
             if not self.token:
                 raise AppError("Shopify gave no access token: check the app is installed on the store")
@@ -368,7 +374,8 @@ class GoogleAds:
             raise AppError("config.yaml: google_ads is missing " + ", ".join(missing))
         tok = http_json("https://oauth2.googleapis.com/token", urllib.parse.urlencode({
             "client_id": b["client_id"], "client_secret": b["client_secret"], "refresh_token": b["refresh_token"],
-            "grant_type": "refresh_token"}).encode(), {"Content-Type": "application/x-www-form-urlencoded"})
+            "grant_type": "refresh_token"}).encode(), {"Content-Type": "application/x-www-form-urlencoded"},
+            secret=(b["client_secret"], b["refresh_token"]))
         self.h = {"Authorization": "Bearer " + tok["access_token"], "developer-token": b["developer_token"],
                   "Content-Type": "application/json"}
         if b.get("login_customer_id"):
@@ -456,7 +463,7 @@ class Klaviyo:
         while url:
             if not url.startswith("https://a.klaviyo.com/api/"):
                 raise AppError("Klaviyo sent an unexpected next-page address")
-            d = http_json(url, headers=self.h)
+            d = http_json(url, headers=self.h, secret=self.key)
             out += d.get("data") or []
             url = (d.get("links") or {}).get("next")
         return out
@@ -483,7 +490,8 @@ class Klaviyo:
             body = {"data": {"type": "flow-series-report", "attributes": {
                 "statistics": self.STATS, "conversion_metric_id": metric_id, "interval": "daily",
                 "timeframe": {"start": f"{a0}T00:00:00", "end": f"{a1 + timedelta(days=1)}T00:00:00"}}}}
-            a = http_json("https://a.klaviyo.com/api/flow-series-reports/", json.dumps(body).encode(), self.h, retries=10)["data"]["attributes"]
+            a = http_json("https://a.klaviyo.com/api/flow-series-reports/", json.dumps(body).encode(), self.h, retries=10,
+                          secret=self.key)["data"]["attributes"]
             out.append({"dates": [d[:10] for d in a.get("date_times") or []], "results": a.get("results") or []})
             a0 = a1 + timedelta(days=1)
         return out
@@ -494,7 +502,8 @@ class Klaviyo:
         body = {"data": {"type": f"{kind}-values-report", "attributes": {
             "statistics": self.STATS, "conversion_metric_id": metric_id,
             "timeframe": {"start": f"{start}T00:00:00", "end": f"{end + timedelta(days=1)}T00:00:00"}}}}
-        d = http_json(f"https://a.klaviyo.com/api/{kind}-values-reports/", json.dumps(body).encode(), self.h, retries=10)
+        d = http_json(f"https://a.klaviyo.com/api/{kind}-values-reports/", json.dumps(body).encode(), self.h, retries=10,
+                      secret=self.key)
         return d["data"]["attributes"].get("results", [])
 
 

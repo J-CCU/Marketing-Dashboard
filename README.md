@@ -215,7 +215,7 @@ Everything is in `CCU Marketing Dashboard.py`:
 |---|---|
 | Top of file | Constants: API versions, history windows, and caveat/gap texts shown on the dashboard |
 | `find_config`, `read_config` | Config lookup and a small YAML reader |
-| `http_json` | HTTPS with retries. The Meta token is masked in error messages. |
+| `http_json` | HTTPS with retries (rate limits, server errors, and dropped or timed-out connections). The Shopify client secret, Google client secret and refresh token, Meta token and Klaviyo key are masked in error messages. |
 | `Shopify`, `GoogleAds`, `MetaAds`, `Klaviyo` | API clients |
 | `compute_retention`, `classify_visit`, `compute_marketing` | Metrics and attribution |
 | `pull`, `assemble` | Orchestration. Ads and email are pulled in parallel with Shopify. |
