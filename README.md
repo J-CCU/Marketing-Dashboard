@@ -4,11 +4,12 @@ A one-file desktop app for CashCards that pulls marketing and sales data and bui
 
 ## Quick start
 
+Prebuilt apps aren't included right now; build one from source (see [Building the app](#building-the-app)) or run the script with Python.
+
 1. Put a `config.yaml` with your API keys next to the app (see [Configuration](#configuration)).
 2. Open the app:
-   - Windows: double-click `CCU Marketing Dashboard.exe`.
-   - macOS: unzip `CCU Marketing Dashboard.app.zip`, then open `CCU Marketing Dashboard.app`.
    - From source: `py "CCU Marketing Dashboard.py"` (Windows) or `python3 "CCU Marketing Dashboard.py"` (macOS).
+   - Or build `CCU Marketing Dashboard.exe` / `CCU Marketing Dashboard.app` yourself (see [Building the app](#building-the-app)) and open that.
 3. Click **Start**. Progress shows in the log box, and the finished dashboard opens in your browser. It is saved under `dashboards/` (see [Outputs](#outputs)).
 
 ## Features
@@ -44,17 +45,15 @@ A one-file desktop app for CashCards that pulls marketing and sales data and bui
 
 ## Requirements
 
-- **Prebuilt apps:** no Python needed. They bundle Python 3.11.
-  - Windows: `CCU Marketing Dashboard.exe`
-  - macOS: `CCU Marketing Dashboard.app.zip`
-- **From source:** Python 3 with tkinter (3.11 is the version the prebuilt apps use). Only the standard library is required.
+- **Built app:** a `.exe` or `.app` you build yourself (see [Building the app](#building-the-app)) needs no Python to run; it bundles its own.
+- **From source:** Python 3 with tkinter (3.11 is the version earlier prebuilt apps bundled). Only the standard library is required.
   - `certifi` is optional. On macOS, HTTPS needs certificates: the app uses `certifi` if it is installed, otherwise it exports the Mac keychain's trusted roots to `~/Library/Caches/ccu_marketing_roots.pem`.
   - `tzdata` is optional. On Windows, Python has no time-zone data without it; the app then falls back to built-in daylight-saving rules for the Eastern, Central, Mountain, Pacific and Alaska time zones, and to a fixed offset for any other zone.
 - **API access:** see [Configuration](#configuration) for the credentials each source needs.
 
 ## How to run
 
-### Prebuilt app
+### Built app
 
 1. Put `config.yaml` in the same folder as the app (or another folder the app searches, see [Where config.yaml is looked for](#where-configyaml-is-looked-for)).
 2. Open the app.
@@ -72,7 +71,7 @@ If Windows SmartScreen or macOS Gatekeeper blocks the app, allow it in the syste
 
 ### From source
 
-With no options, the app opens the same window as the prebuilt app:
+With no options, the app opens the same window as the built app:
 
 ```
 py "CCU Marketing Dashboard.py"          # Windows
@@ -172,7 +171,7 @@ The app reads no environment variables. Keep `config.yaml` private and do not co
 
 ## Outputs
 
-Outputs are written to the app folder. For the prebuilt apps only, if that folder is read-only (for example, a quarantined app copy), they go to `~/Downloads` instead.
+Outputs are written to the app folder. For a built app only, if that folder is read-only (for example, a quarantined app copy), they go to `~/Downloads` instead.
 
 | Path | Contents |
 |---|---|
@@ -198,7 +197,7 @@ The export folder is stamped with the store's local time; the dashboard file wit
 
 ## Building the app
 
-The source does not include a build script. The prebuilt apps were packaged with PyInstaller (bundling Python 3.11), and the code detects a frozen build through `sys.frozen`. A comparable build would be:
+The source does not include a build script. Earlier prebuilt apps were packaged with PyInstaller (bundling Python 3.11), and the code detects a frozen build through `sys.frozen`. A comparable build would be:
 
 ```
 pip install pyinstaller certifi
